@@ -9,7 +9,7 @@
 3. 查询结果追加写入 `data/history.jsonl`，同时通过 Windows 通知弹窗提示余额。
 4. 每日查询时间保存在 `data/config.json`，用 `schedule set --time HH:mm` 修改。
 5. 每日定时通过 Windows 任务计划程序实现；自启动优先写入当前用户 Startup 启动文件夹，失败时自动改用当前用户 `HKCU Run` 注册表启动项。
-6. 认证信息接口预留为 `auth save`；推荐实际使用 `login` 保存浏览器会话，因为学校统一认证可能有验证码/二次验证。
+6. 默认使用 `login` 保存浏览器会话；执行 `auth save` 成功保存凭据后，会在会话失效时自动尝试一次账号密码登录。验证码/二次验证仍需人工完成。
 
 ## 安装
 
@@ -75,9 +75,13 @@ python -m uestc_power schedule disable
 python -m uestc_power schedule status
 ```
 
+每日任务需要单独执行 `schedule enable` 注册，仅修改时间不会创建任务。启用后，任务在当前用户已登录时每天运行；如果电脑睡眠或关闭导致错过计划时间，会在恢复可运行状态后由 Windows 补执行，可能有调度延迟。允许使用电池时运行，不会主动唤醒电脑。修改时间后需再次执行 `schedule enable` 更新任务。
+
 ## 自启动开关
 
 登录 Windows 后自动查询一次：
+
+自启动只在登录时执行，从睡眠或合盖状态恢复不会触发；每天自动查询请另外启用每日任务。
 
 ```powershell
 python -m uestc_power autostart enable
@@ -103,7 +107,17 @@ python -m uestc_power autostart status
 python -m uestc_power auth save --username 你的学号
 ```
 
-如果安装并可用 `keyring`，密码会写入系统密钥环；否则只保存用户名。学校门户有验证码或 SSO 跳转时，仍建议使用 `login` 保存浏览器会话。
+如果安装并可用 `keyring`，密码会写入系统密钥环，同时启用 `auto_login`。密码不会写入配置、日志或 GitHub。后续查询优先复用浏览器会话，失效后只在 `https://idas.uestc.edu.cn` 的学校认证表单中尝试一次账号密码登录；登录成功会更新本地会话。
+
+遇到验证码、短信验证、二次认证或密码错误，自动登录会停止，需运行 `python -m uestc_power login` 手动完成认证。程序不会反复尝试密码或绕过验证。如果密钥环不可用，则只保存用户名，不启用自动登录。
+
+关闭自动登录（保留已保存的密码）：
+
+```powershell
+python -m uestc_power config set auto_login false
+```
+
+查询失败时会发出通知，并在自动运行的 `logs/last_run.log` 中记录原因。可以用 `config set notify_on_error false` 关闭失败通知。门户返回 `寝室: -- / 剩余电费: ¥--` 时，表示当前没有拿到有效余额，不会将占位符当成查询结果。
 
 ## 可改配置
 
@@ -137,4 +151,5 @@ python -m uestc_power config set room_label 621
 
 - 这个工具只用于查询你自己的宿舍电费，不会绕过学校认证。
 - 如果统一认证会话过期，重新运行 `python -m uestc_power login`。
+- 自启动日志 `logs/last_run.log` 会记录开始时间、查询输出或错误、退出码。`Exit code: 0` 表示成功，非零表示失败；出现登录会话失效提示时需重新登录。
 - 如果每日定时的 `schedule enable` 被 `schtasks` 拒绝，可以暂时只使用 `autostart enable`；它走当前用户启动文件夹或 `HKCU Run` 注册表。

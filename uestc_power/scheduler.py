@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import base64
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 from .config import RUNNER_SCRIPT, TASK_NAME, AppConfig
@@ -16,7 +18,13 @@ def write_runner_script() -> None:
     RUNNER_SCRIPT.parent.mkdir(parents=True, exist_ok=True)
     content = """$ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-Set-Location $ProjectRoot
+Set-Location -LiteralPath $ProjectRoot
+$LogDirectory = Join-Path $ProjectRoot "logs"
+New-Item -ItemType Directory -Path $LogDirectory -Force | Out-Null
+$LogPath = Join-Path $LogDirectory "last_run.log"
+"[$(Get-Date -Format o)] Query started" | Set-Content -LiteralPath $LogPath -Encoding UTF8
+$env:PYTHONIOENCODING = "utf-8"
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding
 
 if (Test-Path ".\\.venv\\Scripts\\python.exe") {
   $Python = ".\\.venv\\Scripts\\python.exe"
@@ -24,27 +32,52 @@ if (Test-Path ".\\.venv\\Scripts\\python.exe") {
   $Python = "python"
 }
 
-& $Python -m uestc_power query --json *> ".\\logs\\last_run.log"
+try {
+  "Python: $Python" | Out-File -LiteralPath $LogPath -Append -Encoding UTF8
+  $ErrorActionPreference = "Continue"
+  & $Python -u -m uestc_power query --json 2>&1 | Out-File -LiteralPath $LogPath -Append -Encoding UTF8
+  $QueryExitCode = $LASTEXITCODE
+  $ErrorActionPreference = "Stop"
+  "[$(Get-Date -Format o)] Exit code: $QueryExitCode" | Out-File -LiteralPath $LogPath -Append -Encoding UTF8
+  exit $QueryExitCode
+} catch {
+  $_ | Out-String | Out-File -LiteralPath $LogPath -Append -Encoding UTF8
+  "[$(Get-Date -Format o)] Startup failed" | Out-File -LiteralPath $LogPath -Append -Encoding UTF8
+  exit 1
+}
 """
     RUNNER_SCRIPT.write_text(content, encoding="utf-8")
 
 
 def enable_daily_schedule(config: AppConfig) -> None:
+    try:
+        schedule_time = datetime.strptime(config.schedule_time, "%H:%M").strftime("%H:%M")
+    except ValueError:
+        raise ValueError("每日查询时间必须是有效的 HH:mm，例如 08:30。") from None
     write_runner_script()
-    _run_schtasks(
-        [
-            "/Create",
-            "/TN",
-            TASK_NAME,
-            "/SC",
-            "DAILY",
-            "/ST",
-            config.schedule_time,
-            "/TR",
-            _powershell_runner(RUNNER_SCRIPT),
-            "/F",
-        ]
+    arguments = _hidden_powershell_runner(RUNNER_SCRIPT).removeprefix("powershell ").replace("'", "''")
+    task_name = TASK_NAME.replace("'", "''")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding
+$executable = Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+$action = New-ScheduledTaskAction -Execute $executable -Argument '{arguments}'
+$trigger = New-ScheduledTaskTrigger -Daily -At '{schedule_time}'
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName '{task_name}' -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+"""
+    encoded_script = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-EncodedCommand", encoded_script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
     )
+    if result.returncode != 0:
+        raise RuntimeError(f"注册每日任务失败：{result.stderr or result.stdout}")
 
 
 def disable_daily_schedule() -> None:
@@ -57,7 +90,8 @@ def enable_autostart() -> str:
     command = _hidden_powershell_runner(RUNNER_SCRIPT)
     try:
         startup_file.parent.mkdir(parents=True, exist_ok=True)
-        startup_file.write_text(f"@echo off\r\n{command}\r\n", encoding="utf-8")
+        #startup_file.write_text(f"@echo off\r\n{command}\r\n", encoding="utf-8")
+        startup_file.write_text(f"@echo off\r\nchcp 65001 >nul\r\n{command}\r\n", encoding="utf-8")
         return f"启动文件夹：{startup_file}"
     except PermissionError:
         _enable_registry_autostart(command)

@@ -82,7 +82,7 @@ def main() -> None:
     if args.command == "auth":
         ok = prompt_and_save_credentials(config, args.username)
         if ok:
-            print("认证信息已保存到系统密钥环/keyring。")
+            print("认证信息已保存到系统密钥环/keyring，并已启用会话失效后自动登录；验证码或二次认证仍需手动完成。")
         else:
             print("已保存用户名；密码未保存。建议安装 keyring 或使用 login 保存浏览器会话。")
         return
@@ -90,7 +90,15 @@ def main() -> None:
     if args.command == "query":
         from .query import query_electricity
 
-        result = query_electricity(config, show_browser=args.show_browser)
+        try:
+            result = query_electricity(config, show_browser=args.show_browser)
+        except Exception as error:
+            if config.notify_on_error:
+                from .notifier import toast
+
+                toast("宿舍电费查询失败", "请查看 logs/last_run.log；需要重新认证时运行 python -m uestc_power login。")
+            print(f"查询失败：{error}", file=sys.stderr)
+            raise SystemExit(1) from None
         if args.json:
             print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
         else:

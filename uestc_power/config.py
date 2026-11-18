@@ -26,6 +26,8 @@ class AppConfig:
     low_balance_threshold: float | None = 20.0
     notify_on_success: bool = True
     notify_on_low_balance: bool = True
+    notify_on_error: bool = True
+    auto_login: bool = False
     text_patterns: list[str] = field(
         default_factory=lambda: [
             r"寝室[:：]?\s*(?P<room>[\w\-一-龥]+)\s*剩余电费[:：]?\s*[¥￥]?\s*(?P<balance>\d+(?:\.\d+)?)",

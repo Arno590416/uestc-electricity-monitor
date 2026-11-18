@@ -12,6 +12,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 from .config import DATA_DIR, HISTORY_PATH, STATE_PATH, AppConfig, ensure_dirs
+from .auth import automatic_login
 from .notifier import toast
 
 
@@ -39,23 +40,42 @@ def interactive_login(config: AppConfig) -> Path:
 
 
 def query_electricity(config: AppConfig, show_browser: bool = False) -> QueryResult:
-    if not STATE_PATH.exists():
+    if not STATE_PATH.exists() and not config.auto_login:
         raise RuntimeError("还没有浏览器登录会话，请先运行：python -m uestc_power login")
 
     with sync_playwright() as playwright:
         browser = _launch_browser(playwright, headless=not show_browser and config.headless)
-        context = browser.new_context(storage_state=str(STATE_PATH))
-        page = context.new_page()
-        page.goto(config.portal_url, wait_until="networkidle", timeout=60_000)
-        _try_open_profile_card(page)
-        raw_text = _collect_text(page, config)
         try:
-            result = _parse_result(raw_text, config)
-        except RuntimeError as error:
-            debug_paths = _save_debug_snapshot(page, raw_text)
-            raise RuntimeError(f"{error}\n已保存调试快照：{debug_paths}") from error
-        context.storage_state(path=str(STATE_PATH))
-        browser.close()
+            context = browser.new_context(storage_state=str(STATE_PATH) if STATE_PATH.exists() else None)
+            page = context.new_page()
+            page.goto(config.portal_url, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_function(
+                """() => document.querySelector('.xz-top-user-box .topuser') !== null
+                    || location.pathname.includes('/authserver/')""",
+                timeout=25_000,
+            )
+            if "/authserver/" in page.url or page.title() == "统一身份认证平台":
+                automatic_login(page, config)
+            page.locator('.xz-top-user-box .topuser').first.wait_for(state="visible", timeout=25_000)
+            context.storage_state(path=str(STATE_PATH))
+            for attempt in range(2):
+                _try_open_profile_card(page)
+                raw_text = _collect_text(page, config)
+                try:
+                    result = _parse_result(raw_text, config)
+                    break
+                except RuntimeError as error:
+                    if attempt == 0:
+                        page.reload(wait_until="domcontentloaded", timeout=60_000)
+                        if "/authserver/" in page.url:
+                            raise RuntimeError("登录会话已失效，请运行 python -m uestc_power login。") from None
+                        page.locator('.xz-top-user-box .topuser').first.wait_for(state="visible", timeout=25_000)
+                        continue
+                    debug_paths = _save_debug_snapshot(page, raw_text)
+                    raise RuntimeError(f"{error}\n已保存调试快照：{debug_paths}") from error
+            context.storage_state(path=str(STATE_PATH))
+        finally:
+            browser.close()
 
     _append_history(result)
     _notify_if_needed(result, config)
@@ -82,15 +102,15 @@ def _find_edge_path() -> Path | None:
 
 
 def _try_open_profile_card(page) -> None:
+    if _page_has_balance_text(page):
+        return
     selectors = [
-        "text=剩余电费",
-        "text=一卡通余额",
-        "text=/^[\\u4e00-\\u9fa5]{2,4}$/",
+        ".xz-top-user-box .topuser",
+        ".topuser-name",
         "[class*=header] [class*=user]",
         "[class*=header] [class*=avatar]",
         "[class*=top] [class*=user]",
         "[class*=top] [class*=avatar]",
-        "[class*=name]",
         ".user",
         ".avatar",
         "[class*=user]",
@@ -102,12 +122,11 @@ def _try_open_profile_card(page) -> None:
             if element.count() == 0:
                 continue
             element.hover(timeout=2000)
-            page.wait_for_timeout(1200)
-            if _page_has_balance_text(page):
-                return
-            element.click(timeout=1500)
-            page.wait_for_timeout(1200)
-            if _page_has_balance_text(page):
+            for attempt in range(15):
+                page.wait_for_timeout(1000)
+                if _page_has_balance_text(page):
+                    return
+            if selector == ".xz-top-user-box .topuser":
                 return
         except PlaywrightTimeoutError:
             continue
@@ -132,8 +151,8 @@ def _try_open_profile_card(page) -> None:
 
 def _page_has_balance_text(page) -> bool:
     try:
-        text = page.locator("body").inner_text(timeout=2000)
-        return "剩余电费" in text or "电费" in text
+        text = page.locator(".us-tc").first.text_content(timeout=2000) or ""
+        return re.search(r"剩余电费[:：]?\s*[¥￥]?\s*\d+(?:\.\d+)?", text) is not None
     except Exception:
         return False
 
@@ -183,9 +202,10 @@ def _parse_result(raw_text: str, config: AppConfig) -> QueryResult:
             break
 
     if balance is None:
-        excerpt = normalized[:800].replace("\n", " ")
+        if re.search(r"剩余电费[:：]?\s*[¥￥]?\s*--", normalized):
+            raise RuntimeError("已登录，但学校门户返回的电费余额为 --，未取得有效余额；请稍后重试或手动打开个人卡片确认。")
         raise RuntimeError(
-            f"没有从页面识别到“剩余电费”。可在 config.json 调整 text_patterns/custom_selectors。页面片段：{excerpt}"
+            "已登录，但没有从页面识别到有效的“剩余电费”。可在 config.json 调整 text_patterns/custom_selectors。"
         )
 
     return QueryResult(
