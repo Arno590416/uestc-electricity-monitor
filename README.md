@@ -4,7 +4,7 @@
 
 ## 构建流程简述
 
-1. 用 Playwright 调用本机 Microsoft Edge 打开学校门户，首次手动完成统一认证，并把浏览器会话保存到 `data/browser_state.json`。
+1. 用 Playwright 调用本机 Microsoft Edge，使用 `data/edge_profile/` 中的程序专用用户目录保留登录状态，同时保存 `data/browser_state.json` 会话快照；旧版会话首次使用时自动迁移。
 2. 每次查询复用已保存会话，进入门户首页，优先悬停右上角用户名/头像打开个人卡片，并同时解析可见文本与隐藏弹窗 HTML 中的“寝室”和“剩余电费”。
 3. 查询结果追加写入 `data/history.jsonl`，同时通过 Windows 通知弹窗提示余额。
 4. 每日查询时间保存在 `data/config.json`，用 `schedule set --time HH:mm` 修改。
@@ -36,7 +36,7 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 python -m uestc_power login
 ```
 
-Microsoft Edge 打开后，手动登录学校门户。确认能看到首页和个人信息卡片后，回到终端按 Enter，会话会保存到 `data/browser_state.json`。
+Microsoft Edge 打开后，手动登录学校门户。确认能看到首页和个人信息卡片后，回到终端按 Enter，会话会保存到专用用户目录及 `data/browser_state.json`。如果仍在认证页面，程序不会覆盖原有会话。登录和查询不能同时运行，以免浏览器用户目录冲突。
 
 ## 立即查询一次
 
@@ -109,6 +109,10 @@ python -m uestc_power auth save --username 你的学号
 
 如果安装并可用 `keyring`，密码会写入系统密钥环，同时启用 `auto_login`。密码不会写入配置、日志或 GitHub。后续查询优先复用浏览器会话，失效后只在 `https://idas.uestc.edu.cn` 的学校认证表单中尝试一次账号密码登录；登录成功会更新本地会话。
 
+新版认证页默认显示微信扫码时，脚本会先切换到“账号登录”，再定位可见的账号密码表单，由学校网页自身完成密码处理与提交。学校提供“记住登录”选项时会尝试勾选。专用浏览器目录可以减少重复登录，但不能延长学校规定的会话有效期，也不能保证学校以后更新时永远不需要适配。
+
+首次升级会自动导入原来的会话文件；请在与你的每日任务相同的 Windows 用户下运行程序。不要把 `data/edge_profile/` 上传或复制给别人，它包含认证状态。换电脑时需重新登录并保存认证信息。
+
 遇到验证码、短信验证、二次认证或密码错误，自动登录会停止，需运行 `python -m uestc_power login` 手动完成认证。程序不会反复尝试密码或绕过验证。如果密钥环不可用，则只保存用户名，不启用自动登录。
 
 关闭自动登录（保留已保存的密码）：
@@ -118,6 +122,8 @@ python -m uestc_power config set auto_login false
 ```
 
 查询失败时会发出通知，并在自动运行的 `logs/last_run.log` 中记录原因。可以用 `config set notify_on_error false` 关闭失败通知。门户返回 `寝室: -- / 剩余电费: ¥--` 时，表示当前没有拿到有效余额，不会将占位符当成查询结果。
+
+`logs/events.jsonl` 以追加方式记录每次运行的会话复用、自动登录、余额读取和通知调用结果，不记录账号密码或 Cookie。`auth/authenticated` 表示自动认证成功，`auth/verification_required` 表示需要人工验证。`notification/submitted` 仅表示通知进程调用成功，不等于用户已看到或已阅读；`notification/failed` 会记录进程失败或超时。此版本仍使用 Windows 气泡通知，不保证在通知中心保留。
 
 ## 可改配置
 
@@ -143,9 +149,12 @@ python -m uestc_power config set room_label 621
 - `uestc_power/config.py`：配置路径和默认值。
 - `uestc_power/scheduler.py`：每日任务计划、启动文件夹和当前用户注册表自启动开关。
 - `uestc_power/auth.py`：认证信息保存接口。
+- `uestc_power/browser.py`：专用 Edge 用户目录、旧会话迁移和并发保护。
+- `uestc_power/diagnostics.py`：运行阶段事件日志。
 - `data/config.json`：用户配置。
 - `data/history.jsonl`：历史查询记录。
 - `logs/last_run.log`：计划任务最近一次运行日志。
+- `logs/events.jsonl`：追加保存的登录、查询和通知诊断记录。
 
 ## 注意
 

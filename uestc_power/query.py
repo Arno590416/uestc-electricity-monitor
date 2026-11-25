@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from html import unescape
 from dataclasses import asdict, dataclass
@@ -11,8 +10,10 @@ from pathlib import Path
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-from .config import DATA_DIR, HISTORY_PATH, STATE_PATH, AppConfig, ensure_dirs
+from .config import DATA_DIR, HISTORY_PATH, STATE_PATH, PROFILE_DIR, AppConfig, ensure_dirs
 from .auth import automatic_login
+from .browser import browser_session, launch_browser as _launch_browser
+from .diagnostics import record_event
 from .notifier import toast
 
 
@@ -28,26 +29,30 @@ class QueryResult:
 def interactive_login(config: AppConfig) -> Path:
     ensure_dirs()
     with sync_playwright() as playwright:
-        browser = _launch_browser(playwright, headless=False)
-        context = browser.new_context()
-        page = context.new_page()
-        page.goto(config.portal_url, wait_until="domcontentloaded", timeout=60_000)
-        print("请在打开的 Microsoft Edge 里完成学校统一认证登录。")
-        input("登录完成并能看到门户首页后，回到这里按 Enter 保存会话...")
-        context.storage_state(path=str(STATE_PATH))
-        browser.close()
+        with browser_session(playwright, headless=False) as context:
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto(config.portal_url, wait_until="domcontentloaded", timeout=60_000)
+            print("请在打开的 Microsoft Edge 里完成学校统一认证登录。")
+            input("登录完成并能看到门户首页后，回到这里按 Enter 保存会话...")
+            if "/authserver/" in page.url:
+                raise RuntimeError("尚未完成学校认证，未覆盖已保存的会话。请完成登录后重试。")
+            page.locator('.xz-top-user-box .topuser').first.wait_for(state="visible", timeout=25_000)
+            context.storage_state(path=str(STATE_PATH))
+            record_event("auth", "manual_authenticated", "手动认证已完成并保存")
     return STATE_PATH
 
 
 def query_electricity(config: AppConfig, show_browser: bool = False) -> QueryResult:
-    if not STATE_PATH.exists() and not config.auto_login:
+    if not STATE_PATH.exists() and not (PROFILE_DIR / "Default").exists() and not config.auto_login:
         raise RuntimeError("还没有浏览器登录会话，请先运行：python -m uestc_power login")
 
-    with sync_playwright() as playwright:
-        browser = _launch_browser(playwright, headless=not show_browser and config.headless)
-        try:
-            context = browser.new_context(storage_state=str(STATE_PATH) if STATE_PATH.exists() else None)
-            page = context.new_page()
+    record_event("query", "started")
+    try:
+        with sync_playwright() as playwright, browser_session(
+            playwright, headless=not show_browser and config.headless
+        ) as context:
+            page = context.pages[0] if context.pages else context.new_page()
+            record_event("query", "opening_portal")
             page.goto(config.portal_url, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_function(
                 """() => document.querySelector('.xz-top-user-box .topuser') !== null
@@ -55,10 +60,14 @@ def query_electricity(config: AppConfig, show_browser: bool = False) -> QueryRes
                 timeout=25_000,
             )
             if "/authserver/" in page.url or page.title() == "统一身份认证平台":
+                record_event("auth", "session_expired", "会话失效，准备自动续登")
                 automatic_login(page, config)
+            else:
+                record_event("auth", "session_reused", "已复用现有登录状态")
             page.locator('.xz-top-user-box .topuser').first.wait_for(state="visible", timeout=25_000)
             context.storage_state(path=str(STATE_PATH))
             for attempt in range(2):
+                record_event("query", "reading_balance", attempt=attempt + 1)
                 _try_open_profile_card(page)
                 raw_text = _collect_text(page, config)
                 try:
@@ -74,31 +83,14 @@ def query_electricity(config: AppConfig, show_browser: bool = False) -> QueryRes
                     debug_paths = _save_debug_snapshot(page, raw_text)
                     raise RuntimeError(f"{error}\n已保存调试快照：{debug_paths}") from error
             context.storage_state(path=str(STATE_PATH))
-        finally:
-            browser.close()
+    except Exception as error:
+        record_event("query", "failed", error_type=type(error).__name__)
+        raise
 
     _append_history(result)
+    record_event("query", "succeeded", room=result.room, balance=result.balance)
     _notify_if_needed(result, config)
     return result
-
-
-def _launch_browser(playwright, headless: bool):
-    edge_path = _find_edge_path()
-    if edge_path:
-        return playwright.chromium.launch(executable_path=str(edge_path), headless=headless)
-    return playwright.chromium.launch(channel="msedge", headless=headless)
-
-
-def _find_edge_path() -> Path | None:
-    candidates = [
-        Path(os.environ.get("PROGRAMFILES", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
-        Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
-    ]
-    for path in candidates:
-        if path.exists():
-            return path
-    return None
 
 
 def _try_open_profile_card(page) -> None:

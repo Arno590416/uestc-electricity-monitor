@@ -4,13 +4,13 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
-
-
+# 目的是获取当前文件的上两级目录，通常用于确定应用程序的根目录，以便在该目录下创建或访问数据、日志和配置文件等资源。
 APP_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = APP_DIR / "data"
 LOG_DIR = APP_DIR / "logs"
 CONFIG_PATH = DATA_DIR / "config.json"
 STATE_PATH = DATA_DIR / "browser_state.json"
+PROFILE_DIR = DATA_DIR / "edge_profile"
 HISTORY_PATH = DATA_DIR / "history.jsonl"
 RUNNER_SCRIPT = APP_DIR / "scripts" / "run_query.ps1"
 TASK_NAME = "UESTC-Dorm-Electricity-Monitor"
@@ -23,7 +23,7 @@ class AppConfig:
     schedule_time: str = "08:30"
     headless: bool = True
     room_label: str = ""
-    low_balance_threshold: float | None = 20.0
+    low_balance_threshold: float | None = 20.0#这是一个可选的浮点数类型的属性，表示低余额阈值。它可以是一个浮点数，也可以是 None，默认值为 20.0。
     notify_on_success: bool = True
     notify_on_low_balance: bool = True
     notify_on_error: bool = True
